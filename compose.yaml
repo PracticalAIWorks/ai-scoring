@@ -1,0 +1,14 @@
+services:
+  scoring:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-8000}:8000"
+    environment:
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请在.env中设置管理密码}
+      COOKIE_SECURE: "${COOKIE_SECURE:-1}"
+      DATA_DIR: /data
+    volumes:
+      - competition_data:/data
+volumes:
+  competition_data:

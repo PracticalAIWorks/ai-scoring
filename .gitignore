@@ -1,0 +1,16 @@
+.venv/
+.idea/
+__pycache__/
+data/
+.env
+*.log
+dist/
+test-artifacts/
+preview-*.png
+outputs/
+backups/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+.env.*
+!.env.example

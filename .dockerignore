@@ -1,0 +1,13 @@
+.venv
+.idea
+.git
+__pycache__
+**/__pycache__
+data
+dist
+test-artifacts
+outputs
+backups
+.env
+*.log
+preview-*.png
