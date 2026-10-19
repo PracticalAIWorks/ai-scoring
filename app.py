@@ -123,8 +123,12 @@ def admin_session(env,db):
 
 
 def snapshot(db):
+    settings=dict(db.execute('SELECT key,value FROM settings WHERE key != "initialized"').fetchall())
+    # Existing databases keep their settings; serve the optimized bundled poster.
+    if settings.get('poster')=='/static/competition-poster.png':
+        settings['poster']='/static/competition-poster-v1-1600.webp'
     return {
-        'settings':dict(db.execute('SELECT key,value FROM settings WHERE key != "initialized"').fetchall()),
+        'settings':settings,
         'categories':RUBRICS,
         'judges':[dict(r) for r in db.execute('SELECT * FROM judges ORDER BY rowid')],
         'projects':[dict(r) for r in db.execute('SELECT * FROM projects ORDER BY category,number,rowid')],
@@ -273,7 +277,7 @@ def application(env,start_response):
                     if DATA/'media' not in file.parents: raise ApiError('文件不存在',404)
                 else: raise ApiError('未找到页面',404)
                 if not file.is_file(): raise ApiError('文件不存在',404)
-                data=file.read_bytes(); mime=mimetypes.guess_type(file.name)[0] or 'application/octet-stream'
+                data=file.read_bytes(); mime={'.webp':'image/webp','.avif':'image/avif'}.get(file.suffix.lower()) or mimetypes.guess_type(file.name)[0] or 'application/octet-stream'
                 if mime.startswith('text/') or mime in ('application/javascript',): mime+='; charset=utf-8'
             else: raise ApiError('请求方法不支持',405)
         if not isinstance(data,bytes): data=json.dumps(data,ensure_ascii=False,allow_nan=False).encode('utf-8')
@@ -284,7 +288,8 @@ def application(env,start_response):
         traceback.print_exc()
         status=500; data=json.dumps({'error':'服务暂时不可用，请稍后重试'},ensure_ascii=False).encode()
     phrase={200:'OK',400:'Bad Request',401:'Unauthorized',403:'Forbidden',404:'Not Found',405:'Method Not Allowed',413:'Payload Too Large',429:'Too Many Requests',500:'Internal Server Error'}[status]
-    headers += [('Content-Type',mime),('Content-Length',str(len(data))),('Cache-Control','no-store'),('X-Content-Type-Options','nosniff'),('X-Frame-Options','DENY'),('Referrer-Policy','same-origin')]
+    cache='public, max-age=31536000, immutable' if status==200 and path.startswith('/static/competition-poster-v1-') and path.endswith(('.webp','.avif')) else 'no-store'
+    headers += [('Content-Type',mime),('Content-Length',str(len(data))),('Cache-Control',cache),('X-Content-Type-Options','nosniff'),('X-Frame-Options','DENY'),('Referrer-Policy','same-origin')]
     start_response(f'{status} {phrase}',headers)
     return [b'' if method=='HEAD' else data]
 
