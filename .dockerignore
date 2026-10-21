@@ -9,5 +9,6 @@ test-artifacts
 outputs
 backups
 .env
+.env.*
 *.log
 preview-*.png

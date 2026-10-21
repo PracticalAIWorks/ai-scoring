@@ -1,0 +1,36 @@
+const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
+const {spawn}=require('child_process'),fs=require('fs'),os=require('os'),path=require('path'),assert=require('assert');
+const root=path.resolve(__dirname,'..'),temp=fs.mkdtempSync(path.join(os.tmpdir(),'ai-score-admin-')),origin='http://127.0.0.1:8020';
+const server=spawn(process.env.TEST_PYTHON||'python',['app.py'],{cwd:root,env:{...process.env,HOST:'127.0.0.1',PORT:'8020',DATA_DIR:temp,ADMIN_PASSWORD:'score-admin-test',COOKIE_SECURE:'0'}});
+let browser;
+(async()=>{
+for(let i=0;i<70;i++){try{const response=await fetch(origin+'/api/bootstrap');await response.arrayBuffer();if(response.ok)break}catch{}await new Promise(r=>setTimeout(r,100))}
+browser=await chromium.launch({channel:'msedge',headless:true});const page=await browser.newPage({viewport:{width:1440,height:1000}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
+await page.goto(origin+'/admin');await page.fill('#password','score-admin-test');await page.click('#login-form button');await page.waitForSelector('#open-leaderboard');
+for(const id of ['demo-judge-2','demo-judge-3'])assert((await page.request.post(origin+'/api/admin/judges',{data:{id,name:id,active:false}})).ok());
+await page.click('#refresh');await page.click('[data-tab="judge-scores"]');await page.waitForSelector('[data-manage-score]');
+await page.locator('[data-manage-score]').first().click();
+assert.equal(await page.inputValue('#editor-judge'),'demo-judge-1');
+await page.selectOption('#editor-judge','demo-judge-2');await page.waitForFunction(()=>document.querySelector('#managed-score-form button.primary')?.textContent.includes('demo-judge-2'));
+assert.equal(await page.inputValue('#editor-judge'),'demo-judge-2');
+await page.locator('#managed-score-form input[type="number"]').first().fill('1');
+page.once('dialog',d=>d.dismiss());await page.selectOption('#editor-judge','demo-judge-1');assert.equal(await page.inputValue('#editor-judge'),'demo-judge-2');
+page.once('dialog',d=>d.accept());await page.selectOption('#editor-judge','demo-judge-1');await page.waitForFunction(()=>document.querySelector('#managed-score-form button.primary')?.textContent.includes('演示评委1'));
+assert.equal(await page.locator('#managed-score-form input[type="number"]').first().inputValue(),'');
+await page.screenshot({path:path.join(root,'test-artifacts','score-editor-desktop.png')});
+await page.setViewportSize({width:390,height:844});await page.screenshot({path:path.join(root,'test-artifacts','score-editor-mobile.png')});
+const box=await page.locator('.managed-editor').boundingBox();assert(box.x>=0&&box.x+box.width<=390);assert(await page.locator('#managed-score-form button.primary').isVisible());
+await page.locator('.managed-editor-heading [data-close]').click();await page.setViewportSize({width:1440,height:1000});
+const edit=async(stage)=>{if(stage)await page.selectOption('#score-stage',stage);await page.locator('[data-manage-score]').first().click();await page.waitForSelector('#managed-score-form');for(const input of await page.locator('#managed-score-form input[type="number"]').all())await input.fill(await input.getAttribute('max'));await page.fill('#managed-score-form [name="reason"]','核对演示数据');await Promise.all([page.waitForResponse(r=>r.url().endsWith('/api/admin/judge-scores')&&r.request().method()==='POST'),page.click('#managed-score-form button.primary')]);await page.waitForSelector('#managed-score-form',{state:'detached'});await page.waitForFunction(()=>document.querySelector('#score-management-list tbody tr')?.textContent.includes('已完成'))};
+await edit();let data=await (await page.request.get(origin+'/api/admin/judge-scores?judge_id=demo-judge-1&round=preliminary')).json();assert.equal(data.records.find(r=>r.project_id==='demo-project-1').total,100);
+await page.waitForTimeout(150);await edit('final');
+await page.selectOption('#score-stage','preliminary');await page.waitForFunction(()=>document.querySelector('#score-management-list tbody tr')?.textContent.includes('已完成'));
+await page.locator('[data-clear-score]').first().click();assert.equal(await page.locator('#clear-managed-form [name="reason"]').count(),0);await page.click('#clear-managed-form button.primary');await page.waitForSelector('#clear-managed-form',{state:'detached'});await page.waitForFunction(()=>document.querySelector('#score-management-list tbody tr')?.textContent.includes('未评分'));
+data=await (await page.request.get(origin+'/api/admin/judge-scores?judge_id=demo-judge-1&round=final')).json();assert.equal(data.records.find(r=>r.project_id==='demo-project-1').total,100);
+await page.selectOption('#score-stage','final');await page.waitForFunction(()=>document.querySelector('#score-management-list tbody tr')?.textContent.includes('已完成'));
+await page.click('#clear-judge-stage');assert.equal(await page.locator('#clear-managed-form [name="reason"]').count(),0);await page.click('#clear-managed-form button.primary');await page.waitForSelector('#clear-managed-form',{state:'detached'});await page.waitForFunction(()=>document.querySelector('#score-management-list tbody tr')?.textContent.includes('未评分'));
+await page.selectOption('#score-judge','demo-judge-2');await page.waitForFunction(()=>document.querySelector('#panel').textContent.includes('已停用，评分仅保留历史明细'));
+await page.setViewportSize({width:390,height:844});assert(await page.locator('#score-judge').isVisible());assert(!(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth)));
+await page.screenshot({path:path.join(root,'test-artifacts','admin-score-management-mobile.png')});await page.setViewportSize({width:1440,height:1000});await page.screenshot({path:path.join(root,'test-artifacts','admin-score-management-desktop.png')});assert.deepEqual(errors,[]);
+console.log('PASS: administrator child-score edit, automatic totals, stage isolation, single-project and whole-stage clearing, inactive judge history, mobile filters, no JavaScript errors.');
+})().catch(e=>{console.error(e);process.exitCode=1}).finally(async()=>{if(browser)await browser.close();server.kill();setTimeout(()=>fs.rmSync(temp,{recursive:true,force:true}),500)});

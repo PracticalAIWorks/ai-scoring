@@ -8,6 +8,10 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请在.env中设置管理密码}
       COOKIE_SECURE: "${COOKIE_SECURE:-1}"
       DATA_DIR: /data
+      WECOM_CORP_ID: ${WECOM_CORP_ID:-}
+      WECOM_AGENT_ID: ${WECOM_AGENT_ID:-}
+      WECOM_SECRET: ${WECOM_SECRET:-}
+      WECOM_PUBLIC_URL: ${WECOM_PUBLIC_URL:-}
     volumes:
       - competition_data:/data
 volumes:

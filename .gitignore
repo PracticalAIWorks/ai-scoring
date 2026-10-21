@@ -14,3 +14,10 @@ backups/
 *.sqlite3-shm
 .env.*
 !.env.example
+
+# Private verification files and local Python/tool caches
+static/wecom-verification/
+wecom-settings.env
+.pytest_cache/
+**/__pycache__/
+*.pyc

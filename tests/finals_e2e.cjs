@@ -1,0 +1,73 @@
+// Optional real-browser checks for the final round and live leaderboard.
+const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
+const {spawn}=require('child_process');
+const fs=require('fs'),os=require('os'),path=require('path'),assert=require('assert');
+const root=path.resolve(__dirname,'..'),temp=fs.mkdtempSync(path.join(os.tmpdir(),'ai-finals-e2e-')),origin='http://127.0.0.1:8012';
+const server=spawn(process.env.TEST_PYTHON||'python',['app.py'],{cwd:root,env:{...process.env,HOST:'127.0.0.1',PORT:'8012',DATA_DIR:temp,ADMIN_PASSWORD:'finals-test-password',COOKIE_SECURE:'0'}});
+let browser;
+(async()=>{
+for(let i=0;i<60;i++){try{const r=await fetch(origin+'/api/bootstrap');await r.arrayBuffer();if(r.ok)break}catch{}await new Promise(r=>setTimeout(r,100))}
+browser=await chromium.launch({channel:'msedge',headless:true});
+const errors=[],managerContext=await browser.newContext({viewport:{width:1440,height:1000}}),manager=await managerContext.newPage();manager.on('pageerror',e=>errors.push(e.message));
+await manager.goto(origin+'/admin');await manager.fill('#password','finals-test-password');await manager.click('#login-form button');await manager.waitForSelector('#open-leaderboard');
+assert((await manager.request.post(origin+'/api/admin/judges',{data:{id:'demo-judge-3',name:'演示评委3',active:false}})).ok());
+const token=async judge=>{const r=await manager.request.post(origin+'/api/admin/judge-entry',{data:{judge_id:judge}});assert(r.ok());return (await r.json()).token};
+const entry1=await token('demo-judge-1'),entry2=await token('demo-judge-2');
+const configure=async(id,score,active=true)=>{await manager.click('[data-tab="finals"]');await manager.click(`[data-finalist-category="${['demo-project-5','demo-project-6'].includes(id)?'agent':'solution'}"]`);await manager.click(`[data-finalist="${id}"]`);await manager.selectOption('#finalist-initial-source','manual');await manager.fill('#preliminary-score',String(score));await manager.locator('#finalist-active').setChecked(active);await manager.click('#finalist-form button.primary');await manager.waitForSelector('#finalist-form',{state:'detached'})};
+await configure('demo-project-3',80);await configure('demo-project-4',90);await configure('demo-project-5',85);
+assert.equal(await manager.locator('[data-finalist="demo-project-1"]').count(),0);
+const judgeContext=await browser.newContext({viewport:{width:390,height:700},isMobile:true,hasTouch:true}),judge=await judgeContext.newPage();judge.on('pageerror',e=>errors.push(e.message));
+await judge.goto(origin+'/#entry/'+entry1);await judge.waitForSelector('#judge-name');await judge.click('#enter');await judge.waitForSelector('.project-card');await judge.click('[data-cat="solution"]');await judge.click('[data-project="demo-project-3"]');
+// Keep a preliminary edit offline while the administrator switches rounds.
+await judgeContext.setOffline(true);await judge.locator('[data-dim="0"][data-sub="0"]').fill('3');await judge.waitForTimeout(550);
+await manager.selectOption('#scoring-round','final');await manager.click('#save-scoring-round');await manager.click('#confirm-round');await manager.waitForSelector('#confirm-round',{state:'detached'});
+await judgeContext.setOffline(false);await judge.locator('#save-status').filter({hasText:'比赛阶段已切换'}).waitFor();
+await judge.reload();await judge.waitForSelector('.score-input');assert.equal(await judge.locator('[data-dim="0"][data-sub="0"]').inputValue(),'');assert((await judge.locator('.score-panel h2').textContent()).includes('复试'));
+const initial=await judge.request.get(origin+'/api/scores?round=preliminary');assert.deepEqual((await initial.json()).scores,[]);
+await judge.click('#back-list');assert.equal(await judge.locator('[data-cat="prompt"]').count(),0);assert.equal(await judge.locator('.tab').count(),2);assert.equal(await judge.locator('.project-card').count(),2);
+await manager.click('[data-tab="projects"]');assert(!(await manager.locator('#panel').textContent()).includes('提示词设计'));await manager.click('[data-tab="standards"]');assert(!(await manager.locator('#panel').textContent()).includes('提示词设计'));
+const popupEvent=manager.waitForEvent('popup');await manager.click('#open-leaderboard');const board=await popupEvent;board.on('pageerror',e=>errors.push(e.message));await board.waitForSelector('[data-category="agent"]');assert.equal(await board.locator('.ranking-group').count(),2);
+assert.equal(await board.locator('.ranking-group:visible').count(),1);assert(await board.locator('#panel-agent').isVisible());assert(await board.locator('#panel-solution').isHidden());
+await board.click('#tab-solution');assert(await board.locator('#panel-solution').isVisible());assert(await board.locator('#panel-agent').isHidden());assert.equal(new URL(board.url()).hash,'#solution');
+await board.reload();await board.waitForSelector('#panel-solution');assert.equal(await board.locator('.ranking-group:visible').count(),1);assert.equal(await board.locator('#tab-solution').getAttribute('aria-selected'),'true');
+await board.locator('#tab-solution').press('ArrowLeft');assert(await board.locator('#panel-agent').isVisible());await board.locator('#tab-agent').press('ArrowRight');assert(await board.locator('#panel-solution').isVisible());
+const boardRow=id=>board.locator(`[data-project="${id}"]`);
+assert.equal(await boardRow('demo-project-3').locator('.score').textContent(),'待评分');
+const fillTotal=async(page,project,target)=>{if(!page.url().endsWith('#score/'+project)){await page.goto(origin+'/#score/'+project);await page.waitForSelector('.score-input')}const inputs=page.locator('.score-input');let deficit=100-target;for(let i=0;i<await inputs.count();i++){const input=inputs.nth(i),label=await input.getAttribute('aria-label'),max=Number(label.match(/满分(\d+)分/)[1]),minus=Math.min(deficit,max);deficit-=minus;await input.fill(String(max-minus))}await page.locator('#save-status').filter({hasText:'已保存到服务器'}).waitFor()};
+await fillTotal(judge,'demo-project-3',100);
+assert.equal((await (await manager.request.get(origin+'/api/leaderboard')).json()).categories.flatMap(c=>c.projects).find(p=>p.id==='demo-project-3').score,null);
+assert.equal(await board.locator('#tab-solution').getAttribute('aria-selected'),'true');assert.equal(await board.locator('.ranking-group:visible').count(),1);
+const secondContext=await browser.newContext({viewport:{width:360,height:640},isMobile:true}),second=await secondContext.newPage();await second.goto(origin+'/#entry/'+entry2);await second.waitForSelector('#judge-name');await second.click('#enter');await second.waitForSelector('.project-card');
+await fillTotal(second,'demo-project-3',80);
+await board.waitForFunction(()=>document.querySelector('[data-project="demo-project-3"] .score')?.textContent==='83.00',null,{timeout:10000});
+await fillTotal(judge,'demo-project-4',100);
+assert.equal((await (await manager.request.get(origin+'/api/leaderboard')).json()).categories.flatMap(c=>c.projects).find(p=>p.id==='demo-project-4').score,null);
+await fillTotal(second,'demo-project-4',100);
+await board.waitForFunction(()=>document.querySelector('[data-project="demo-project-4"] .rank')?.textContent==='1'&&document.querySelector('[data-project="demo-project-3"] .rank')?.textContent==='2',null,{timeout:10000});
+await fillTotal(judge,'demo-project-5',100);
+await fillTotal(second,'demo-project-5',100);
+await board.waitForFunction(()=>document.querySelector('[data-project="demo-project-5"] .score')?.textContent==='89.50',null,{timeout:10000});
+assert.equal(await boardRow('demo-project-5').locator('.rank').textContent(),'1');
+assert(!(await board.locator('body').textContent()).match(/70%|30%|初试平均|复试平均|提示词/));
+for(const width of [320,390,1440,1920]){await board.setViewportSize({width,height:width<=390?844:1000});assert(await board.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`leaderboard overflow at ${width}`)}
+fs.mkdirSync(path.join(root,'test-artifacts'),{recursive:true});await board.screenshot({path:path.join(root,'test-artifacts','leaderboard-desktop.png'),fullPage:true});await board.setViewportSize({width:390,height:844});await board.screenshot({path:path.join(root,'test-artifacts','leaderboard-mobile.png'),fullPage:true});await board.click('#tab-agent');await board.screenshot({path:path.join(root,'test-artifacts','leaderboard-agent-mobile.png'),fullPage:true});await board.click('#tab-solution');
+// A cleared child makes the panel incomplete; no partial-panel result is published.
+await judge.goto(origin+'/#score/demo-project-3');await judge.waitForSelector('.score-input');await judge.locator('[data-dim="0"][data-sub="0"]').fill('');await judge.locator('#save-status').filter({hasText:'已保存到服务器'}).waitFor();
+await board.waitForFunction(()=>document.querySelector('[data-project="demo-project-3"] .score')?.textContent==='待评分',null,{timeout:10000});
+await configure('demo-project-3',90);
+assert.equal((await (await manager.request.get(origin+'/api/leaderboard')).json()).categories.flatMap(c=>c.projects).find(p=>p.id==='demo-project-3').score,null);
+await fillTotal(judge,'demo-project-3',100);
+await board.waitForFunction(()=>document.querySelector('[data-project="demo-project-3"] .score')?.textContent==='90.00',null,{timeout:10000});
+await judgeContext.setOffline(true);await judge.locator('[data-dim="0"][data-sub="0"]').fill('2');await judge.waitForTimeout(600);
+await configure('demo-project-3',90,false);await judgeContext.setOffline(false);
+await board.waitForSelector('[data-project="demo-project-3"]',{state:'detached',timeout:10000});
+await judge.waitForSelector('.project-card');await judge.click('[data-project="demo-project-4"]');await judge.waitForSelector('.score-input');await judge.locator('[data-dim="0"][data-sub="0"]').fill('9');await judge.locator('#save-status').filter({hasText:'已保存到服务器'}).waitFor();
+await board.waitForFunction(()=>document.querySelector('[data-project="demo-project-4"] .score')?.textContent==='92.85',null,{timeout:10000});
+await judge.reload();await judge.waitForSelector('.score-input');await judge.locator('[data-dim="0"][data-sub="0"]').fill('8');await judge.locator('#save-status').filter({hasText:'已保存到服务器'}).waitFor();
+await board.waitForFunction(()=>document.querySelector('[data-project="demo-project-4"] .score')?.textContent==='92.70',null,{timeout:10000});
+const report=await manager.request.get(origin+'/api/admin/export');assert(report.ok());assert((await report.body()).length>3000);
+await manager.setViewportSize({width:390,height:844});await manager.screenshot({path:path.join(root,'test-artifacts','admin-finals-mobile.png'),fullPage:true});
+await manager.selectOption('#scoring-round','preliminary');await manager.click('#save-scoring-round');await manager.click('#confirm-round');await manager.waitForSelector('#confirm-round',{state:'detached'});
+const untouched=await second.request.get(origin+'/api/scores?round=preliminary');assert.deepEqual((await untouched.json()).scores,[]);
+assert.deepEqual(errors,[]);console.log('PASS: manual initial scores, two-category final round, separate queues, live weighted ranks, multiple judges, incomplete exclusion, changing initial score, removing finalists, desktop/mobile layout and final export.');
+})().catch(error=>{console.error(error);process.exitCode=1}).finally(async()=>{if(browser)await browser.close();server.kill();setTimeout(()=>fs.rmSync(temp,{recursive:true,force:true}),500)});
